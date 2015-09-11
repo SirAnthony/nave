@@ -352,8 +352,14 @@ nave_modules () {
          && pwd )/$(basename -- "$SYM")
   done
 
-  # XXX npm update required sometimes
-  #nave_npm "$version" "-g" "install" "npm"
+  # Update npm to latest version
+  # XXX: check if supported on old versions of node
+  local remote_npm_ver=$(nave_npm "$version" "info" "npm" "version")
+  local npm_ver=$(nave_npm "$version" "ls" "--depth" "0" "-g" "npm" \
+    "|" "grep" "npm@" "|" "sed" "-e" "s/.*npm@//g" "-e" "s/[[:space:]]//g")
+  if [ "x${npm_ver}x" != "x${remote_npm_ver}x" ]; then
+    nave_npm "$version" "-g" "install" "npm"
+  fi
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf sleep semver")
   for module in $BOOTSTRAP; do
