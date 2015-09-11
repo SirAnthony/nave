@@ -76,12 +76,13 @@ main () {
     DIR=$(dirname -- "$SELF_PATH")
     SYM=$(readlink -- "$SELF_PATH")
     SELF_PATH=$( cd -- "$DIR" \
-              && cd -- $(dirname -- "$SYM") \
-              && pwd \
-              )/$(basename -- "$SYM")
+         && cd -- $(dirname -- "$SYM") \
+         && pwd )/$(basename -- "$SYM")
   done
 
-  if ! [ -d "$NAVE_DIR" ]; then
+  NAVE_BIN_DIR="$(dirname -- "$SELF_PATH")"
+
+  if [ -z "$NAVE_DIR" ]; then
     if [ -d "$HOME" ]; then
       NAVE_DIR="$HOME"/.nave
     else
@@ -89,7 +90,7 @@ main () {
     fi
   fi
   if ! [ -d "$NAVE_DIR" ] && ! mkdir -p -- "$NAVE_DIR"; then
-    NAVE_DIR="$(dirname -- "$SELF_PATH")"
+    NAVE_DIR="$NAVE_BIN_DIR"
   fi
 
   # set up the naverc init file.
@@ -154,7 +155,7 @@ RC
 #    use)
 #      cmd="nave_named"
 #      ;;
-    install | fetch | use | clean | test | named | \
+    install | fetch | use | clean | test | named | npm | \
     ls |  uninstall | usemain | latest | stable | has | installed )
       cmd="nave_$cmd"
       ;;
@@ -183,6 +184,10 @@ function enquote_all () {
                    )""'"
   done
   echo "$ARGS"
+}
+
+function join () {
+  local IFS=" "; echo "$*";
 }
 
 ensure_dir () {
@@ -257,25 +262,28 @@ build () {
     if [ $binavail -eq 1 ]; then
       local t="$version-$os-$arch"
       local tgz="$NAVE_SRC/$t.tgz"
-      for url in "https://iojs.org/dist/v$version/iojs-v${t}.tar.gz" \
-                "http://nodejs.org/dist/v$version/node-v${t}.tar.gz"; do
-        get -#Lf "$url" > "$tgz"
-        if [ $? -ne 0 ]; then
+      # XXX sha1 check
+      if ! [ -f "$tgz" ]; then
+        for url in "https://iojs.org/dist/v$version/iojs-v${t}.tar.gz" \
+                   "http://nodejs.org/dist/v$version/node-v${t}.tar.gz"; do
+          get -#Lf "$url" > "$tgz"
+          if [ $? -eq 0 ]; then break; fi
           # binary download failed.  oh well.  cleanup, and proceed.
           rm "$tgz"
-        else
-          # unpack straight into the build target.
-          $tar xzf "$tgz" -C "$2" --strip-components 1
-          if [ $? -ne 0 ]; then
-            rm "$tgz"
-            nave_uninstall "$version"
-            echo "Binary unpack failed, trying source." >&2
-          fi
-          # it worked!
-          echo "installed from binary" >&2
-          return 0
+        done
+      fi
+      if [ -f "$tgz" ]; then
+        # unpack straight into the build target.
+        $tar xzf "$tgz" -C "$2" --strip-components 1
+        if [ $? -ne 0 ]; then
+          rm "$tgz"
+          nave_uninstall "$version"
+          echo "Binary unpack failed, trying source." >&2
         fi
-      done
+        # it worked!
+        echo "installed from binary" >&2
+        return 0
+      fi
       echo "Binary download failed, trying source." >&2
     fi
   fi
@@ -329,14 +337,53 @@ nave_usemain () {
   build "$version" "$prefix"
 }
 
+nave_modules () {
+  local version="$1"
+  local modules="$2"
+  if [ -z "$modules" ]; then
+    return 0
+  fi
+  local SCRIPT="./node_modules.js"
+  while [ -h "$SCRIPT" ]; do
+    DIR=$(dirname -- "$SCRIPT")
+    SYM=$(readlink -- "$SCRIPT")
+    SCRIPT=$( cd -- "$DIR" \
+         && cd -- $(dirname -- "$SYM") \
+         && pwd )/$(basename -- "$SYM")
+  done
+
+  # XXX npm update required sometimes
+  # nave_npm "$version" "-g" "install" "npm"
+  # install bootstrap modules
+  local BOOTSTRAP=("node-getopt rimraf sleep semver")
+  for module in $BOOTSTRAP; do
+    nave_npm "$version" "-g" "ls" "$module"
+    local ret=$?
+    if [ $ret -ne 0 ]; then
+      nave_npm "$version" "-g" "install" "$module"
+      ret=$?
+      if [ $ret -ne 0 ]; then
+        return $ret
+      fi
+    fi
+  done
+
+  args=$(join '$NAVEPATH/node' "--debug-brk" "$SCRIPT" "build" "$modules" "-s" \
+      "-d" '$NAVE_MODULES')
+  nave_exec_env "0" "$version" "$version" "-c" "$args"
+  return $?
+}
+
 nave_install () {
   local version=$(ver "$1")
+  local modules="$2"
   if [ -z "$version" ]; then
     fail "Must supply a version ('stable', 'latest' or numeric)"
   fi
   if nave_installed "$version"; then
     echo "Already installed: $version" >&2
-    return 0
+    nave_modules "$version" "$modules"
+    return $?
   fi
   local install="$NAVE_ROOT/$version"
   ensure_dir "$install"
@@ -347,6 +394,9 @@ nave_install () {
     remove_dir "$install"
     return $ret
   fi
+
+  nave_modules "$version" "$modules"
+  return $?
 }
 
 nave_test () {
@@ -499,52 +549,15 @@ nave_use () {
   fi
 
   nave_install "$version" || fail "failed to install $version"
-  local prefix="$NAVE_ROOT/$version"
-  local lvl=$[ ${NAVELVL-0} + 1 ]
   echo "using $version" >&2
-  if [ $# -gt 1 ]; then
-    shift
-    nave_exec "$lvl" "$version" "$version" "$prefix" "$@"
-    return $?
-  else
-    nave_login "$lvl" "$version" "$version" "$prefix"
-    return $?
-  fi
-}
-
-# internal
-nave_exec () {
-  nave_run "exec" "$@"
-  return $?
-}
-
-nave_login () {
-  nave_run "login" "$@"
+  nave_run "login" "$version" "$version"
   return $?
 }
 
 nave_run () {
   local exec="$1"
   shift
-  local lvl="$1"
-  shift
-  local name="$1"
-  shift
-  local version="$1"
-  shift
-  local prefix="$1"
-  shift
 
-  local bin="$prefix/bin"
-  local lib="$prefix/lib/node"
-  local man="$prefix/share/man"
-  ensure_dir "$bin"
-  ensure_dir "$lib"
-  ensure_dir "$man"
-
-  # now $@ is the command to run, or empty if it's not an exec.
-  local exit_code
-  local args=()
   local isLogin
 
   if [ "$exec" == "exec" ]; then
@@ -561,6 +574,30 @@ nave_run () {
     args=("--rcfile" "$NAVE_DIR/.zshenv")
   fi
 
+  nave_exec_env "$isLogin" "$@" "${args[@]}"
+  return $?
+}
+
+nave_exec_env () {
+  local lvl=$[ ${NAVELVL-0} + 1 ]
+  local isLogin="$1"
+  shift
+  local name="$1"
+  shift
+  local version="$1"
+  shift
+
+  local prefix="$NAVE_ROOT/$name"
+  local bin="$prefix/bin"
+  local lib="$prefix/lib/node"
+  local modules="$prefix/lib/node_modules"
+  local man="$prefix/share/man"
+  ensure_dir "$bin"
+  ensure_dir "$lib"
+  ensure_dir "$man"
+
+  # now $@ is the command to run, or empty if it's not an exec.
+  local exit_code
   local nave="$version"
   if [ "$version" != "$name" ]; then
     nave="$name"-"$version"
@@ -575,11 +612,12 @@ nave_run () {
   npm_config_root="$lib" \
   npm_config_manroot="$man" \
   npm_config_prefix="$prefix" \
-  NODE_PATH="$lib" \
+  NAVE_MODULES="$modules" \
+  NODE_PATH="$lib:$modules" \
   NAVE_LOGIN="$isLogin" \
   NAVE_DIR="$NAVE_DIR" \
   ZDOTDIR="$NAVE_DIR" \
-    "$SHELL" "${args[@]}"
+    "$SHELL" "$@"
 
   exit_code=$?
   hash -r
@@ -609,15 +647,12 @@ nave_named () {
     version="$(ver "$("$NAVE_ROOT/$name/bin/node" -v 2>/dev/null)")"
   fi
 
-  local prefix="$NAVE_ROOT/$name"
-
-  local lvl=$[ ${NAVELVL-0} + 1 ]
   # get the version
   if [ $# -gt 0 ]; then
-    nave_exec "$lvl" "$name" "$version" "$prefix" "$@"
+    nave_run "exec" "$name" "$version" "$@"
     return $?
   else
-    nave_login "$lvl" "$name" "$version" "$prefix"
+    nave_run "login" "$name" "$version"
     return $?
   fi
 }
@@ -665,6 +700,13 @@ nave_uninstall () {
   remove_dir "$NAVE_ROOT/$(ver "$1")"
 }
 
+nave_npm () {
+  local version="$1"
+  shift
+  local args=$(join '$NAVEPATH/npm' "$@")
+  nave_exec_env "0" "$version" "$version" "-c" "$args"
+}
+
 nave_help () {
   cat <<EOF
 
@@ -672,20 +714,22 @@ Usage: nave <cmd>
 
 Commands:
 
-install <version>    Install the version passed (ex: 0.1.103)
-use <version>        Enter a subshell where <version> is being used
-use <ver> <program>  Enter a subshell, and run "<program>", then exit
-use <name> <ver>     Create a named env, using the specified version.
-                     If the name already exists, but the version differs,
-                     then it will update the link.
-usemain <version>    Install in /usr/local/bin (ie, use as your main nodejs)
-clean <version>      Delete the source code for <version>
-uninstall <version>  Delete the install for <version>
-ls                   List versions currently installed
-ls-remote            List remote node versions
-ls-all               List remote and local node versions
-latest               Show the most recent dist version
-help                 Output help information
+install <version> <mods>  Install the version passed (ex: 0.1.103).
+                          List provided by <mods> will be used to setup modules
+use <version>             Enter a subshell where <version> is being used
+use <ver> <program>       Enter a subshell, and run "<program>", then exit
+use <name> <ver>          Create a named env, using the specified version.
+                          If the name already exists, but the version differs,
+                          then it will update the link.
+usemain <version>         Install in /usr/local/bin (ie, use as your main nodejs)
+clean <version>           Delete the source code for <version>
+uninstall <version>       Delete the install for <version>
+npm <version> [args..]    Run npm in <version> env
+ls                        List versions currently installed
+ls-remote                 List remote node versions
+ls-all                    List remote and local node versions
+latest                    Show the most recent dist version
+help                      Output help information
 
 <version> can be the string "latest" to get the latest distribution.
 <version> can be the string "stable" to get the latest stable version.
