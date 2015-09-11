@@ -353,11 +353,11 @@ nave_modules () {
   done
 
   # XXX npm update required sometimes
-  # nave_npm "$version" "-g" "install" "npm"
+  #nave_npm "$version" "-g" "install" "npm"
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf sleep semver")
   for module in $BOOTSTRAP; do
-    nave_npm "$version" "-g" "ls" "$module"
+    nave_npm "$version" "-g" "ls" "--depth" "0" "$module"
     local ret=$?
     if [ $ret -ne 0 ]; then
       nave_npm "$version" "-g" "install" "$module"
@@ -368,7 +368,7 @@ nave_modules () {
     fi
   done
 
-  args=$(join '$NAVEPATH/node' "--debug-brk" "$SCRIPT" "build" "$modules" "-s" \
+  args=$(join '$NAVEPATH/node' "$SCRIPT" "build" "$modules" "-s" \
       "-d" '$NAVE_MODULES')
   nave_exec_env "0" "$version" "$version" "-c" "$args"
   return $?
