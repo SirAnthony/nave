@@ -226,9 +226,9 @@ nave_fetch () {
     "http://nodejs.org/dist/node-$version.tar.gz"
   )
   for url in "${urls[@]}"; do
-    get -#Lf "$url" > "$src".tgz
+    get -#Lf "$url" > "$src".tar.gz
     if [ $? -eq 0 ]; then
-      $tar xzf "$src".tgz -C "$src" --strip-components=1
+      $tar xzf "$src".tar.gz -C "$src" --strip-components=1
       if [ $? -eq 0 ]; then
         echo "fetched from $url" >&2
         return 0
@@ -236,7 +236,7 @@ nave_fetch () {
     fi
   done
 
-  rm "$src".tgz
+  rm "$src".tar.gz
   remove_dir "$src"
   echo "Couldn't fetch $version" >&2
   return 1
@@ -244,6 +244,18 @@ nave_fetch () {
 
 get () {
   curl -H "user-agent:nave/$(curl --version | head -n1)" "$@"
+  return $?
+}
+
+sha_check () {
+  local file="$1"
+  local sha=$(cat "$file.sha" | awk '{ printf $1; }')
+  local length=$(echo -n "$sha" | wc -c)
+  if [ $length == "64" ]; then
+    echo "$sha  $file" | sha256sum -c #2>&1
+  else
+    echo "$sha  $file" | sha1sum -c #2>&1
+  fi
   return $?
 }
 
@@ -261,9 +273,18 @@ build () {
     esac
     if [ $binavail -eq 1 ]; then
       local t="$version-$os-$arch"
-      local tgz="$NAVE_SRC/$t.tgz"
-      # XXX sha1 check
-      if ! [ -f "$tgz" ]; then
+      local tgz="$NAVE_SRC/$t.tar.gz"
+      local sha="$tgz.sha"
+      if ! [ -f "$sha" ]; then
+        for url in "https://iojs.org/dist/v$version/SHASUMS256.txt" \
+                   "http://nodejs.org/dist/v$version/SHASUMS256.txt" \
+                   "http://nodejs.org/dist/v$version/SHASUMS.txt"; do
+          get -#Lf "$url" | grep "${t}" > "$sha"
+          if [ $? -eq 0 ]; then break; fi
+          rm "$sha"
+        done
+      fi
+      if ! [ -f "$tgz" ] || ! sha_check "$tgz"; then
         for url in "https://iojs.org/dist/v$version/iojs-v${t}.tar.gz" \
                    "http://nodejs.org/dist/v$version/node-v${t}.tar.gz"; do
           get -#Lf "$url" > "$tgz"
@@ -272,7 +293,7 @@ build () {
           rm "$tgz"
         done
       fi
-      if [ -f "$tgz" ]; then
+      if [ -f "$tgz" ] && sha_check "$tgz"; then
         # unpack straight into the build target.
         $tar xzf "$tgz" -C "$2" --strip-components 1
         if [ $? -ne 0 ]; then
@@ -339,7 +360,11 @@ nave_usemain () {
 
 nave_modules () {
   local version="$1"
-  local modules="$2"
+  shift
+  local modules="$1"
+  shift
+  local update_npm="$1"
+  shift
   if [ -z "$modules" ]; then
     return 0
   fi
@@ -353,12 +378,14 @@ nave_modules () {
   done
 
   # Update npm to latest version
-  # XXX: check if supported on old versions of node
-  local remote_npm_ver=$(nave_npm "$version" "info" "npm" "version")
-  local npm_ver=$(nave_npm "$version" "ls" "--depth" "0" "-g" "npm" \
-    "|" "grep" "npm@" "|" "sed" "-e" "s/.*npm@//g" "-e" "s/[[:space:]]//g")
-  if [ "x${npm_ver}x" != "x${remote_npm_ver}x" ]; then
-    nave_npm "$version" "-g" "install" "npm"
+  if ! [ -z "$update_npm" ]; then
+    # XXX: check if supported on old versions of node
+    local remote_npm_ver=$(nave_npm "$version" "info" "npm" "version")
+    local npm_ver=$(nave_npm "$version" "ls" "--depth" "0" "-g" "npm" \
+      "|" "grep" "npm@" "|" "sed" "-e" "s/.*npm@//g" "-e" "s/[[:space:]]//g")
+    if [ "x${npm_ver}x" != "x${remote_npm_ver}x" ]; then
+      nave_npm "$version" "-g" "install" "npm"
+    fi
   fi
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf sleep semver")
@@ -401,7 +428,7 @@ nave_install () {
     return $ret
   fi
 
-  nave_modules "$version" "$modules"
+  nave_modules "$version" "$modules" "1"
   return $?
 }
 
@@ -699,7 +726,8 @@ add_named_env () {
 }
 
 nave_clean () {
-  rm -rf "$NAVE_SRC/$(ver "$1")" "$NAVE_SRC/$(ver "$1")".tgz "$NAVE_SRC/$(ver "$1")"-*.tgz
+  rm -rf "$NAVE_SRC/$(ver "$1")" "$NAVE_SRC/$(ver "$1")".tar.gz \
+    "$NAVE_SRC/$(ver "$1")"-*.tar.gz
 }
 
 nave_uninstall () {
