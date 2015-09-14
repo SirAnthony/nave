@@ -51,9 +51,11 @@ case "$uname" in
   Linux\ *) os=linux ;;
   Darwin\ *) os=darwin ;;
   SunOS\ *) os=sunos ;;
+  Cygwin\ *) os=cygwin ;;
 esac
 case "$uname" in
   *i386*) arch=x86 ;;
+  *i686*) arch=x86 ;;
   *x86_64*) arch=x64 ;;
   *raspberrypi*) arch=arm-pi ;;
 esac
@@ -259,9 +261,104 @@ sha_check () {
   return $?
 }
 
+get_shasum () {
+  local tgz="$1"
+  local bin=$(basename -- $tgz)
+  local sha="$tgz.sha"
+  if ! [ -f "$sha" ]; then
+    for url in "https://iojs.org/dist/v$version/SHASUMS256.txt" \
+               "http://nodejs.org/dist/v$version/SHASUMS256.txt" \
+               "http://nodejs.org/dist/v$version/SHASUMS.txt"; do
+      get -#Lf "$url" | grep "${bin}" > "$sha"
+      if [ $? -eq 0 ]; then break; fi
+      rm "$sha"
+    done
+  fi
+}
+
+get_node () {
+  local version="$1"
+  local tgz="$2"
+  local download="$3"
+  if ! [ -f "$tgz" ] || ! sha_check "$tgz"; then
+    # cygwin support
+    local nodedir=""
+    local iojsdir=""
+    if [ "$os" == "cygwin" ]; then
+      case "$arch" in
+          x86) iojsdir="win-x86/" ;;
+          x64)
+            iojsdir="win-x64/"
+            nodedir="x64/"
+          ;;
+      esac
+    fi
+    for url in "https://iojs.org/dist/v$version/${iojsdir}iojs$download" \
+               "http://nodejs.org/dist/v$version/${nodedir}node$download"; do
+      get -#Lf "$url" > "$tgz"
+      if [ $? -eq 0 ]; then break; fi
+      # binary download failed.  oh well.  cleanup, and proceed.
+      rm "$tgz"
+    done
+  fi
+}
+
+build_npm () {
+  local version="$1"
+  local target
+  local tab="$NAVE_SRC/index.tab"
+  rm $tab
+  # merge all tab files
+  for url in "https://iojs.org/dist/index.tab" \
+               "http://nodejs.org/dist/index.tab"; do
+    get -#Lf "$url" >> "$tab"
+  done
+  local npm_ver=$(cat $tab | grep "v$version" | awk '{ printf $4; }')
+  local npm="npm-${npm_ver}.tgz"
+  local tgz="$NAVE_SRC/$tgz"
+  get -#Lf "https://nodejs.org/dist/npm/$npm" >> "$tgz"
+  if [ $? -ne 0 ] || ! [ -f $tgz ]; then
+    echo "Cannot download npm" >&2
+    rm $tgz
+    return 1
+  fi
+  $tar xzf "$tgz" -C "$target/lib/node_modules" --strip-components 1
+  if [ $? -ne 0 ]; then
+    echo "Cannot unpack npm" >&2
+    rm "$tgz"
+    return 1
+  fi
+}
+
+build_cygwin () {
+  local version="$1"
+  local target="$2"
+  local tgz="$NAVE_SRC/node.exe"
+  get_shasum "$tgz"
+  get_node "$version" "$tgz" ".exe"
+  if [ -f "$tgz" ] && sha_check "$tgz"; then
+    mkdir -p "$target/bin/node.exe"
+    cp "$tgz" "$target/bin/node.exe"
+    build_npm "$version" "$target"
+    if [ $? -eq 0 ]; then
+      echo "installed from binary" >&2
+      return 0
+    fi
+    rm "$tgz"
+    nave_uninstall "$version"
+    echo "Binary unpack failed." >&2
+  fi
+  return 1
+}
+
 build () {
   local version="$1"
-
+  local target="$2"
+  # install on cygwin if needed
+  if [ "$os" == "cygwin" ]; then
+    build_cygwin "$version" "$target"
+    return $?
+  fi
   # shortcut - try the binary if possible.
   if [ -n "$os" ]; then
     local binavail
@@ -274,36 +371,19 @@ build () {
     if [ $binavail -eq 1 ]; then
       local t="$version-$os-$arch"
       local tgz="$NAVE_SRC/$t.tar.gz"
-      local sha="$tgz.sha"
-      if ! [ -f "$sha" ]; then
-        for url in "https://iojs.org/dist/v$version/SHASUMS256.txt" \
-                   "http://nodejs.org/dist/v$version/SHASUMS256.txt" \
-                   "http://nodejs.org/dist/v$version/SHASUMS.txt"; do
-          get -#Lf "$url" | grep "${t}" > "$sha"
-          if [ $? -eq 0 ]; then break; fi
-          rm "$sha"
-        done
-      fi
-      if ! [ -f "$tgz" ] || ! sha_check "$tgz"; then
-        for url in "https://iojs.org/dist/v$version/iojs-v${t}.tar.gz" \
-                   "http://nodejs.org/dist/v$version/node-v${t}.tar.gz"; do
-          get -#Lf "$url" > "$tgz"
-          if [ $? -eq 0 ]; then break; fi
-          # binary download failed.  oh well.  cleanup, and proceed.
-          rm "$tgz"
-        done
-      fi
+      get_shasum "$tgz"
+      get_node "$version" "$tgz" "-v${t}.tar.gz"
       if [ -f "$tgz" ] && sha_check "$tgz"; then
         # unpack straight into the build target.
-        $tar xzf "$tgz" -C "$2" --strip-components 1
-        if [ $? -ne 0 ]; then
-          rm "$tgz"
-          nave_uninstall "$version"
-          echo "Binary unpack failed, trying source." >&2
+        $tar xzf "$tgz" -C "$target" --strip-components 1
+        if [ $? -eq 0 ]; then
+          # it worked!
+          echo "installed from binary" >&2
+          return 0
         fi
-        # it worked!
-        echo "installed from binary" >&2
-        return 0
+        rm "$tgz"
+        nave_uninstall "$version"
+        echo "Binary unpack failed, trying source." >&2
       fi
       echo "Binary download failed, trying source." >&2
     fi
