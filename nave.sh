@@ -51,7 +51,7 @@ case "$uname" in
   Linux\ *) os=linux ;;
   Darwin\ *) os=darwin ;;
   SunOS\ *) os=sunos ;;
-  Cygwin\ *) os=cygwin ;;
+  *\ Cygwin) os=cygwin ;;
 esac
 case "$uname" in
   *i386*) arch=x86 ;;
@@ -95,52 +95,7 @@ main () {
     NAVE_DIR="$NAVE_BIN_DIR"
   fi
 
-  # set up the naverc init file.
-  # For zsh compatibility, we name this file ".zshenv" instead of
-  # the more reasonable "naverc" name.
-  # Important! Update this number any time the init content is changed.
-  local rcversion="#3"
-  local rcfile="$NAVE_DIR/.zshenv"
-  if ! [ -f "$rcfile" ] \
-      || [ "$(head -n1 "$rcfile")" != "$rcversion" ]; then
-
-    cat > "$rcfile" <<RC
-$rcversion
-[ "\$NAVE_DEBUG" != "" ] && set -x || true
-if [ "\$BASH" != "" ]; then
-  if [ "\$NAVE_LOGIN" != "" ]; then
-    [ -f ~/.bash_profile ] && . ~/.bash_profile || true
-    [ -f ~/.bash_login ] && .  ~/.bash_login || true
-    [ -f ~/.profile ] && . ~/.profile || true
-  else
-    [ -f ~/.bashrc ] && . ~/.bashrc || true
-  fi
-else
-  [ -f ~/.zshenv ] && . ~/.zshenv || true
-  export DISABLE_AUTO_UPDATE=true
-  if [ "\$NAVE_LOGIN" != "" ]; then
-    [ -f ~/.zprofile ] && . ~/.zprofile || true
-    [ -f ~/.zshrc ] && . ~/.zshrc || true
-    [ -f ~/.zlogin ] && . ~/.zlogin || true
-  else
-    [ -f ~/.zshrc ] && . ~/.zshrc || true
-  fi
-fi
-unset ZDOTDIR
-export PATH=\$NAVEPATH:\$PATH
-[ -f ~/.naverc ] && . ~/.naverc || true
-RC
-
-    cat > "$NAVE_DIR/.zlogout" <<RC
-[ -f ~/.zlogout ] && . ~/.zlogout || true
-RC
-
-  fi
-
-  # couldn't write file
-  if ! [ -f "$rcfile" ] || [ "$(head -n1 "$rcfile")" != "$rcversion" ]; then
-    fail "Nave dir $NAVE_DIR is not writable."
-  fi
+  nave_rc "$NAVE_DIR"
 
   export NAVE_DIR
   export NAVE_SRC="$NAVE_DIR/src"
@@ -207,6 +162,55 @@ remove_dir () {
 fail () {
   echo "$@" >&2
   exit 1
+}
+
+nave_rc () {
+  local dir="$1"
+  # set up the naverc init file.
+  # For zsh compatibility, we name this file ".zshenv" instead of
+  # the more reasonable "naverc" name.
+  # Important! Update this number any time the init content is changed.
+  local rcversion="#3"
+  local rcfile="$dir/.zshenv"
+  if [ -f "$rcfile" ] && [ "$(head -n1 "$rcfile")" == "$rcversion" ]; then
+    return 0
+  fi
+
+  cat > "$rcfile" <<RC
+$rcversion
+[ "\$NAVE_DEBUG" != "" ] && set -x || true
+if [ "\$BASH" != "" ]; then
+  if [ "\$NAVE_LOGIN" != "" ]; then
+    [ -f ~/.bash_profile ] && . ~/.bash_profile || true
+    [ -f ~/.bash_login ] && .  ~/.bash_login || true
+    [ -f ~/.profile ] && . ~/.profile || true
+  else
+    [ -f ~/.bashrc ] && . ~/.bashrc || true
+  fi
+else
+  [ -f ~/.zshenv ] && . ~/.zshenv || true
+  export DISABLE_AUTO_UPDATE=true
+  if [ "\$NAVE_LOGIN" != "" ]; then
+    [ -f ~/.zprofile ] && . ~/.zprofile || true
+    [ -f ~/.zshrc ] && . ~/.zshrc || true
+    [ -f ~/.zlogin ] && . ~/.zlogin || true
+  else
+    [ -f ~/.zshrc ] && . ~/.zshrc || true
+  fi
+fi
+unset ZDOTDIR
+export PATH=\$NAVEPATH:\$PATH
+[ -f ~/.naverc ] && . ~/.naverc || true
+RC
+
+  cat > "$dir/.zlogout" <<RC
+[ -f ~/.zlogout ] && . ~/.zlogout || true
+RC
+
+  # couldn't write file
+  if ! [ -f "$rcfile" ] || [ "$(head -n1 "$rcfile")" != "$rcversion" ]; then
+    fail "Nave dir $dir is not writable."
+  fi
 }
 
 nave_fetch () {
