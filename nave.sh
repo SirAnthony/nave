@@ -476,7 +476,7 @@ nave_modules () {
   if [ -z "$modules" ]; then
     return 0
   fi
-  local SCRIPT="./node_modules.js"
+  local SCRIPT="$NAVE_BIN_DIR/node_modules.js"
   while [ -h "$SCRIPT" ]; do
     DIR=$(dirname -- "$SCRIPT")
     SYM=$(readlink -- "$SCRIPT")
@@ -484,6 +484,8 @@ nave_modules () {
          && cd -- $(dirname -- "$SYM") \
          && pwd )/$(basename -- "$SYM")
   done
+
+  [ "$os" == "cygwin" ] && SCRIPT=$(cygpath -m $SCRIPT)
 
   # Update npm to latest version
   if ! [ -z "$update_npm" ]; then
@@ -496,7 +498,9 @@ nave_modules () {
     fi
   fi
   # install bootstrap modules
-  local BOOTSTRAP=("node-getopt rimraf sleep semver")
+  local BOOTSTRAP=("node-getopt rimraf semver")
+  # XXX: remove
+  if [ "$os" != "cygwin" ]; then BOOTSTRAP+="sleep"; fi
   for module in $BOOTSTRAP; do
     nave_npm "$version" "-g" "ls" "--depth" "0" "$module"
     local ret=$?
@@ -739,12 +743,23 @@ nave_exec_env () {
   ensure_dir "$lib"
   ensure_dir "$man"
 
+  if [ "$os" == "cygwin" ]; then
+    prefix="$(cygpath -w $prefix)\\lib"
+    bin=$(cygpath -w $bin)
+    lib=$(cygpath -w $lib)
+    modules=$(cygpath -w $modules)
+    man=$(cygpath -w $modules)
+  fi
+
   # now $@ is the command to run, or empty if it's not an exec.
   local exit_code
   local nave="$version"
   if [ "$version" != "$name" ]; then
     nave="$name"-"$version"
   fi
+
+  local sep=":"
+  [ "$os" == "cygwin" ] && sep=";"
 
   NAVELVL=$lvl \
   NAVEPATH="$bin" \
@@ -756,7 +771,7 @@ nave_exec_env () {
   npm_config_manroot="$man" \
   npm_config_prefix="$prefix" \
   NAVE_MODULES="$modules" \
-  NODE_PATH="$lib:$modules" \
+  NODE_PATH="$lib${sep}$modules" \
   NAVE_LOGIN="$isLogin" \
   NAVE_DIR="$NAVE_DIR" \
   ZDOTDIR="$NAVE_DIR" \
