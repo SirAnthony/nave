@@ -340,14 +340,23 @@ build_npm () {
     return 1
   fi
   # Install binaries
-  cp "$npm_dir/bin/npm" "$npm_dir/bin/npm.cmd" "$target/bin/"
-  chmod 0755 "$npm_dir/bin/npm" "$npm_dir/bin/npm.cmd"
+  cp "$npm_dir/bin/npm" "$target/bin/"
+  chmod 0755 "$npm_dir/bin/npm"
   if [ $? -ne 0 ]; then return 1; fi
-  # node_modules/npm must be near node.exe create symlink
-  local bin_dir=$(cygpath -w "$target/bin/node_modules/")
-  rm -f "$bin_dir"
-  cmd /c "mklink /D $bin_dir ..\\lib\\node_modules"
-  return $?
+  if [ "$os" == "cygwin" ]; then
+    cp "$npm_dir/bin/npm.cmd" "$target/bin/"
+    chmod 0755 "$npm_dir/bin/npm.cmd"
+    if [ $? -ne 0 ]; then return 1; fi
+    # node_modules/npm must be near node.exe create symlink
+    local bin_dir=$(cygpath -w "$target/bin/node_modules/")
+    rm -f "$bin_dir"
+    cmd /c "mklink /D $bin_dir ..\\lib\\node_modules"
+    if [ $? -ne 0 ]; then return 1; fi
+    # set cygwin python as npm python
+    local python=`cygpath -w $(which python)`
+    nave_npm "$version" "-g" "config" "set" "python" "'$python'"
+    return $?
+  fi
 }
 
 build_cygwin () {
