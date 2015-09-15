@@ -255,7 +255,8 @@ get () {
 
 sha_check () {
   local file="$1"
-  local sha=$(cat "$file.sha" | awk '{ printf $1; }')
+  local base=$(basename -- $file)
+  local sha=$(cat "$file.sha" | grep " $base" | awk '{ printf $1; }')
   local length=$(echo -n "$sha" | wc -c)
   if [ $length == "64" ]; then
     echo "$sha  $file" | sha256sum -c #2>&1
@@ -267,7 +268,8 @@ sha_check () {
 
 get_shasum () {
   local tgz="$1"
-  local bin=$(basename -- $tgz)
+  local base=$(basename -- $tgz)
+  local bin=${2:-$base}
   local sha="$tgz.sha"
   if ! [ -f "$sha" ]; then
     for url in "https://iojs.org/dist/v$version/SHASUMS256.txt" \
@@ -277,6 +279,9 @@ get_shasum () {
       if [ $? -eq 0 ]; then break; fi
       rm "$sha"
     done
+  fi
+  if [ "$bin" != "$base" ]; then
+    sed -e "s/$bin/$base/g" -i $sha
   fi
 }
 
@@ -309,48 +314,64 @@ get_node () {
 
 build_npm () {
   local version="$1"
-  local target
+  local target="$2"
   local tab="$NAVE_SRC/index.tab"
-  rm $tab
+  rm -f $tab
   # merge all tab files
   for url in "https://iojs.org/dist/index.tab" \
                "http://nodejs.org/dist/index.tab"; do
     get -#Lf "$url" >> "$tab"
   done
   local npm_ver=$(cat $tab | grep "v$version" | awk '{ printf $4; }')
-  local npm="npm-${npm_ver}.tgz"
-  local tgz="$NAVE_SRC/$tgz"
-  get -#Lf "https://nodejs.org/dist/npm/$npm" >> "$tgz"
-  if [ $? -ne 0 ] || ! [ -f $tgz ]; then
-    echo "Cannot download npm" >&2
-    rm $tgz
-    return 1
+  local tgz="$NAVE_SRC/npm-${npm_ver}.tar.gz"
+  if ! [ -f "$tgz" ]; then
+    get -#Lf "https://github.com/npm/npm/archive/v${npm_ver}.tar.gz" >> "$tgz"
+    if [ $? -ne 0 ] || ! [ -f $tgz ]; then
+      echo "Cannot download npm" >&2
+      rm $tgz
+      return 1
+    fi
   fi
-  $tar xzf "$tgz" -C "$target/lib/node_modules" --strip-components 1
+  local npm_dir="$target/lib/node_modules/npm"
+  ensure_dir "$npm_dir"
+  $tar xzf "$tgz" -C "$npm_dir" --strip-components 1
   if [ $? -ne 0 ]; then
     echo "Cannot unpack npm" >&2
-    rm "$tgz"
     return 1
   fi
+  # Install binaries
+  cp "$npm_dir/bin/npm" "$npm_dir/bin/npm.cmd" "$target/bin/"
+  if [ $? -ne 0 ]; then return 1; fi
+  # node_modules/npm must be near node.exe create symlink
+  local bin_dir=$(cygpath -w "$target/bin/node_modules/")
+  cmd /c "mklink /D $bin_dir ..\\lib\\node_modules"
+  return $?
 }
 
 build_cygwin () {
   local version="$1"
   local target="$2"
-  local tgz="$NAVE_SRC/node.exe"
-  get_shasum "$tgz"
+  local tgz="$NAVE_SRC/node-${version}.exe"
+  local nodevars="$NAVE_SRC/nodevars.bat"
+  local nv_url="https://raw.githubusercontent.com/nodejs/node/master/tools/msvs/nodevars.bat"
+  get_shasum "$tgz" "node.exe"
   get_node "$version" "$tgz" ".exe"
-  if [ -f "$tgz" ] && sha_check "$tgz"; then
-    mkdir -p "$target/bin/node.exe"
+  if ! [ -f "$nodevars" ]; then
+    get -#Lf "$nv_url" > "$nodevars"
+  fi
+  if [ -f "$nodevars" ] && [ -f "$tgz" ] && sha_check "$tgz"; then
+    ensure_dir "$target/bin/"
     cp "$tgz" "$target/bin/node.exe"
+    cp "$nodevars" "$target/bin/"
     build_npm "$version" "$target"
     if [ $? -eq 0 ]; then
       echo "installed from binary" >&2
       return 0
     fi
-    rm "$tgz"
     nave_uninstall "$version"
     echo "Binary unpack failed." >&2
+  else
+    rm -f "$tgz"
   fi
   return 1
 }
