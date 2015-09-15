@@ -341,9 +341,11 @@ build_npm () {
   fi
   # Install binaries
   cp "$npm_dir/bin/npm" "$npm_dir/bin/npm.cmd" "$target/bin/"
+  chmod 0755 "$npm_dir/bin/npm" "$npm_dir/bin/npm.cmd"
   if [ $? -ne 0 ]; then return 1; fi
   # node_modules/npm must be near node.exe create symlink
   local bin_dir=$(cygpath -w "$target/bin/node_modules/")
+  rm -f "$bin_dir"
   cmd /c "mklink /D $bin_dir ..\\lib\\node_modules"
   return $?
 }
@@ -363,6 +365,7 @@ build_cygwin () {
     ensure_dir "$target/bin/"
     cp "$tgz" "$target/bin/node.exe"
     cp "$nodevars" "$target/bin/"
+    chmod 0755 "$target/bin/node.exe" "$target/bin/nodevars.bat"
     build_npm "$version" "$target"
     if [ $? -eq 0 ]; then
       echo "installed from binary" >&2
@@ -658,7 +661,9 @@ nave_has () {
 
 nave_installed () {
   local version=$(ver "$1")
-  [ -x "$NAVE_ROOT/$version/bin/node" ] || return 1
+  local node="$NAVE_ROOT/$version/bin/node"
+  if [ "$os" == "cygwin" ]; then node="$node.exe"; fi
+  [ -x "$node" ] || return 1
 }
 
 nave_use () {
