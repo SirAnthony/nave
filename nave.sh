@@ -352,7 +352,7 @@ build_npm () {
     rm -f "$bin_dir"
     cmd /c "mklink /D $bin_dir ..\\lib\\node_modules"
     if [ $? -ne 0 ]; then return 1; fi
-    # set cygwin python as npm python
+    # set cygwin python as npm python (for gyp)
     local python=`cygpath -w $(which python)`
     nave_npm "$version" "-g" "config" "set" "python" "'$python'"
     return $?
@@ -388,14 +388,9 @@ build_cygwin () {
   return 1
 }
 
-build () {
+build_unix () {
   local version="$1"
   local target="$2"
-  # install on cygwin if needed
-  if [ "$os" == "cygwin" ]; then
-    build_cygwin "$version" "$target"
-    return $?
-  fi
   # shortcut - try the binary if possible.
   if [ -n "$os" ]; then
     local binavail
@@ -449,6 +444,18 @@ build () {
       || fail "Failed to make $version"
     make install || fail "Failed to install $version"
   ) || fail "fail"
+  return $?
+}
+
+build () {
+  local version="$1"
+  local target="$2"
+  local cmd="fail"
+  case "$os" in
+    cygwin) cmd="build_cygwin" ;;
+    *) cmd="build_unix" ;;
+  esac
+  $cmd "$version" "$target"
   return $?
 }
 
@@ -522,7 +529,7 @@ nave_modules () {
     fi
   done
 
-  args=$(join '$NAVEPATH/node' "$SCRIPT" "build" "$modules" "-s" \
+  args=$(join '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
       "-d" '$NAVE_MODULES')
   nave_exec_env "0" "$version" "$version" "-c" "$args"
   return $?
@@ -748,11 +755,15 @@ nave_exec_env () {
   local lib="$prefix/lib/node"
   local modules="$prefix/lib/node_modules"
   local man="$prefix/share/man"
+  local path="$bin"
   ensure_dir "$bin"
   ensure_dir "$lib"
   ensure_dir "$man"
 
   if [ "$os" == "cygwin" ]; then
+    # XXX: cygwin stores npm binaries in $prefix/lib instead
+    # of bindir, need to force $bin for npm binaries
+    path="$path:$prefix/lib"
     prefix="$(cygpath -w $prefix)\\lib"
     bin=$(cygpath -w $bin)
     lib=$(cygpath -w $lib)
@@ -771,7 +782,8 @@ nave_exec_env () {
   [ "$os" == "cygwin" ] && sep=";"
 
   NAVELVL=$lvl \
-  NAVEPATH="$bin" \
+  NAVEPATH="$path" \
+  NAVEBIN="$bin" \
   NAVEVERSION="$version" \
   NAVENAME="$name" \
   NAVE="$nave" \
@@ -871,7 +883,7 @@ nave_uninstall () {
 nave_npm () {
   local version="$1"
   shift
-  local args=$(join '$NAVEPATH/npm' "$@")
+  local args=$(join '$NAVEBIN/npm' "$@")
   nave_exec_env "0" "$version" "$version" "-c" "$args"
 }
 
