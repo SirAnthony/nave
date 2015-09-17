@@ -112,7 +112,7 @@ main () {
 #    use)
 #      cmd="nave_named"
 #      ;;
-    install | fetch | use | clean | test | named | npm | \
+    install | modules | fetch | use | clean | test | named | npm | \
     ls |  uninstall | usemain | latest | stable | has | installed )
       cmd="nave_$cmd"
       ;;
@@ -256,7 +256,7 @@ get () {
 sha_check () {
   local file="$1"
   local base=$(basename -- $file)
-  local sha=$(cat "$file.sha" | grep " $base" | awk '{ printf $1; }')
+  local sha=$(cat "$file.sha" | awk '{ printf $1; }')
   local length=$(echo -n "$sha" | wc -c)
   if [ $length == "64" ]; then
     echo "$sha  $file" | sha256sum -c #2>&1
@@ -279,9 +279,6 @@ get_shasum () {
       if [ $? -eq 0 ]; then break; fi
       rm "$sha"
     done
-  fi
-  if [ "$bin" != "$base" ]; then
-    sed -e "s/$bin/$base/g" -i $sha
   fi
 }
 
@@ -362,9 +359,10 @@ build_npm () {
 build_cygwin () {
   local version="$1"
   local target="$2"
-  local tgz="$NAVE_SRC/node-${version}.exe"
+  local tgz="$NAVE_SRC/${version}.exe"
   local nodevars="$NAVE_SRC/nodevars.bat"
   local nv_url="https://raw.githubusercontent.com/nodejs/node/master/tools/msvs/nodevars.bat"
+  # check iojs support
   get_shasum "$tgz" "node.exe"
   get_node "$version" "$tgz" ".exe"
   if ! [ -f "$nodevars" ]; then
@@ -456,7 +454,25 @@ build () {
     *) cmd="build_unix" ;;
   esac
   $cmd "$version" "$target"
-  return $?
+  local ret=$?
+  if [ $ret -eq 0 ]; then
+    # save env to use in bash scripts
+    local vars=("NAVELVL NAVEPATH NAVEBIN NAVEVERSION NAVENAME
+      NAVE npm_config_binroot npm_config_root npm_config_manroot
+      npm_config_prefix NODE_MODULES NODE_PATH NAVE_DIR")
+    local script="
+#!/bin/sh"
+    for var in $vars; do
+      script="$script
+export ${var}=\$${var}"
+    done
+    script="$script
+export PATH=\$NAVEPATH:\$PATH
+"
+    local args=$(join cat ">$target/naveenv" "<<END" "${script}END")
+    nave_exec_env "0" "$version" "$version" "-c" "$args"
+  fi
+  return $ret
 }
 
 nave_usemain () {
@@ -483,7 +499,7 @@ nave_usemain () {
 }
 
 nave_modules () {
-  local version="$1"
+  local version=$(ver "$1")
   shift
   local modules="$1"
   shift
@@ -516,7 +532,7 @@ nave_modules () {
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf semver")
   # XXX: remove
-  if [ "$os" != "cygwin" ]; then BOOTSTRAP+="sleep"; fi
+  if [ "$os" != "cygwin" ]; then BOOTSTRAP+=" sleep"; fi
   for module in $BOOTSTRAP; do
     nave_npm "$version" "-g" "ls" "--depth" "0" "$module"
     local ret=$?
@@ -530,21 +546,19 @@ nave_modules () {
   done
 
   args=$(join '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
-      "-d" '$NAVE_MODULES')
+      "-t" "$mods_type" "-d" '$NODE_MODULES')
   nave_exec_env "0" "$version" "$version" "-c" "$args"
   return $?
 }
 
 nave_install () {
   local version=$(ver "$1")
-  local modules="$2"
   if [ -z "$version" ]; then
     fail "Must supply a version ('stable', 'latest' or numeric)"
   fi
   if nave_installed "$version"; then
     echo "Already installed: $version" >&2
-    nave_modules "$version" "$modules"
-    return $?
+    return 0;
   fi
   local install="$NAVE_ROOT/$version"
   ensure_dir "$install"
@@ -553,11 +567,8 @@ nave_install () {
   local ret=$?
   if [ $ret -ne 0 ]; then
     remove_dir "$install"
-    return $ret
   fi
-
-  nave_modules "$version" "$modules" "1"
-  return $?
+  return $ret
 }
 
 nave_test () {
@@ -791,7 +802,7 @@ nave_exec_env () {
   npm_config_root="$lib" \
   npm_config_manroot="$man" \
   npm_config_prefix="$prefix" \
-  NAVE_MODULES="$modules" \
+  NODE_MODULES="$modules" \
   NODE_PATH="$lib${sep}$modules" \
   NAVE_LOGIN="$isLogin" \
   NAVE_DIR="$NAVE_DIR" \
@@ -894,8 +905,8 @@ Usage: nave <cmd>
 
 Commands:
 
-install <version> <mods>  Install the version passed (ex: 0.1.103).
-                          List provided by <mods> will be used to setup modules
+install <version>         Install the version passed (ex: 0.1.103).
+modules <version> <list>  Install modules from specified list
 use <version>             Enter a subshell where <version> is being used
 use <ver> <program>       Enter a subshell, and run "<program>", then exit
 use <name> <ver>          Create a named env, using the specified version.
