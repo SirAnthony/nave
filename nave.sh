@@ -63,7 +63,7 @@ esac
 tar=${TAR-tar}
 
 main () {
-  local SELF_PATH DIR SYM
+  local SELF_PATH
   # get the absolute path of the executable
   SELF_PATH="$0"
   if [ "${SELF_PATH:0:1}" != "." ] && [ "${SELF_PATH:0:1}" != "/" ]; then
@@ -74,14 +74,7 @@ main () {
             ) && SELF_PATH=$SELF_PATH/$(basename -- "$0")
 
   # resolve symlinks
-  while [ -h "$SELF_PATH" ]; do
-    DIR=$(dirname -- "$SELF_PATH")
-    SYM=$(readlink -- "$SELF_PATH")
-    SELF_PATH=$( cd -- "$DIR" \
-         && cd -- $(dirname -- "$SYM") \
-         && pwd )/$(basename -- "$SYM")
-  done
-
+  SELF_PATH="$(resolve "$SELF_PATH")"
   NAVE_BIN_DIR="$(dirname -- "$SELF_PATH")"
 
   if [ -z "$NAVE_DIR" ]; then
@@ -113,7 +106,7 @@ main () {
 #      cmd="nave_named"
 #      ;;
     install | modules | fetch | use | clean | test | named | npm | \
-    ls |  uninstall | usemain | latest | stable | has | installed )
+    ls | uninstall | usemain | latest | stable | has | installed )
       cmd="nave_$cmd"
       ;;
     * )
@@ -130,21 +123,21 @@ main () {
   fi
 }
 
-function enquote_all () {
-  local ARG ARGS
-  ARGS=""
-  for ARG in "$@"; do
-    [ -n "$ARGS" ] && ARGS="$ARGS "
-    ARGS="$ARGS'""$( echo " $ARG" \
-                   | cut -c 2- \
-                   | sed 's/'"'"'/'"'"'"'"'"'"'"'"'/g' \
-                   )""'"
-  done
-  echo "$ARGS"
-}
-
 function join () {
   local IFS=" "; echo "$*";
+}
+
+function resolve () {
+  local FILE="$1"
+  local DIR SYM
+  while [ -h "$FILE" ]; do
+    DIR=$(dirname -- "$FILE")
+    SYM=$(readlink -- "$FILE")
+    FILE=$( cd -- "$DIR" \
+         && cd -- $(dirname -- "$SYM") \
+         && pwd )/$(basename -- "$SYM")
+  done
+  echo $FILE
 }
 
 ensure_dir () {
@@ -170,7 +163,7 @@ nave_rc () {
   # For zsh compatibility, we name this file ".zshenv" instead of
   # the more reasonable "naverc" name.
   # Important! Update this number any time the init content is changed.
-  local rcversion="#3"
+  local rcversion="#4"
   local rcfile="$dir/.zshenv"
   if [ -f "$rcfile" ] && [ "$(head -n1 "$rcfile")" == "$rcversion" ]; then
     return 0
@@ -199,7 +192,7 @@ else
   fi
 fi
 unset ZDOTDIR
-export PATH=\$NAVEPATH:\$PATH
+source \$NAVE_ENV
 [ -f ~/.naverc ] && . ~/.naverc || true
 RC
 
@@ -211,6 +204,63 @@ RC
   if ! [ -f "$rcfile" ] || [ "$(head -n1 "$rcfile")" != "$rcversion" ]; then
     fail "Nave dir $dir is not writable."
   fi
+}
+
+nave_write_env () {
+  local name="$1"
+  shift
+  local version="$1"
+  shift
+  local target="$1"
+  shift
+
+  local prefix="$NAVE_ROOT/$name"
+  [ "$target" != "" ] && prefix="$target"
+  local env_file="$prefix/.nave_env"
+  local bin="$prefix/bin"
+  local lib="$prefix/lib/node"
+  local modules="$prefix/lib/node_modules"
+  local man="$prefix/share/man"
+  local path="$bin"
+  ensure_dir "$bin"
+  ensure_dir "$lib"
+  ensure_dir "$modules"
+  ensure_dir "$man"
+
+  if [ "$os" == "cygwin" ]; then
+    # XXX: cygwin stores npm binaries in $prefix/lib instead
+    # of bindir, need to force $bin for npm binaries
+    path="$path:$prefix/lib"
+    prefix="$(cygpath -w $prefix)\\lib"
+    bin=$(cygpath -w $bin)
+    lib=$(cygpath -w $lib)
+    modules=$(cygpath -w $modules)
+    man=$(cygpath -w $modules)
+  fi
+
+  local nave="$version"
+  if [ "$version" != "$name" ]; then
+    nave="$name"-"$version"
+  fi
+
+  local sep=":"
+  [ "$os" == "cygwin" ] && sep=";"
+
+  cat > $env_file <<ENDENV
+export NAVEPATH="$path"
+export NAVEBIN="$bin"
+export NAVEVERSION="$version"
+export NAVENAME="$name"
+export NAVE="$nave"
+export npm_config_binroot="$bin"
+export npm_config_root="$lib"
+export npm_config_manroot="$man"
+export npm_config_prefix="$prefix"
+export NODE_MODULES="$modules"
+export NODE_PATH="$lib${sep}$modules"
+export NAVE_DIR="$NAVE_DIR"
+export PATH="\$NAVEPATH:\$PATH"
+ENDENV
 }
 
 nave_fetch () {
@@ -414,13 +464,24 @@ build_unix () {
         rm "$tgz"
         nave_uninstall "$version"
         echo "Binary unpack failed, trying source." >&2
+      else
+        echo "Binary download failed, trying source." >&2
       fi
-      echo "Binary download failed, trying source." >&2
     fi
   fi
+  if [ "$os" == "cygwin" ]; then
+    echo "Soruce build does not supported on cygwin";
+    return 1
+  fi
+  build_src "$version" "$target"
+  return $?
+}
 
+build_src () {
+  local version="$1"
+  local target="$2"
   nave_fetch "$version"
-  if [ $? != 0 ]; then
+  if [ $? -ne 0 ]; then
     # fetch failed, don't continue and try to build it.
     return 1
   fi
@@ -436,7 +497,7 @@ build_unix () {
     if [ "$NAVE_CONFIG" == "" ]; then
       NAVE_CONFIG=()
     fi
-    JOBS=$jobs ./configure "${NAVE_CONFIG[@]}" --prefix="$2" \
+    JOBS=$jobs ./configure "${NAVE_CONFIG[@]}" --prefix="$target" \
       || fail "Failed to configure $version"
     JOBS=$jobs make -j$jobs \
       || fail "Failed to make $version"
@@ -456,31 +517,12 @@ build () {
   $cmd "$version" "$target"
   local ret=$?
   if [ $ret -eq 0 ]; then
-    # save env to use in bash scripts
-    local vars=("NAVELVL NAVEPATH NAVEBIN NAVEVERSION NAVENAME
-      NAVE npm_config_binroot npm_config_root npm_config_manroot
-      npm_config_prefix NODE_MODULES NODE_PATH NAVE_DIR")
-    local script="
-#!/bin/sh"
-    for var in $vars; do
-      script="$script
-export ${var}=\$${var}"
-    done
-    script="$script
-export PATH=\$NAVEPATH:\$PATH
-"
-    local args=$(join cat ">$target/naveenv" "<<END" "${script}END")
-    nave_exec_env "0" "$version" "$version" "-c" "$args"
+    nave_write_env "$version" "$version"
   fi
   return $ret
 }
 
-nave_usemain () {
-  if [ ${NAVELVL-0} -gt 0 ]; then
-    fail "Can't usemain inside a nave subshell. Exit to main shell."
-  fi
-  local version=$(ver "$1")
-  local current=$(node -v || true)
+function main_prefix () {
   local wn=$(which node || true)
   local prefix="/usr/local"
   if [ "x$wn" != "x" ]; then
@@ -489,6 +531,16 @@ nave_usemain () {
       prefix="/usr/local"
     fi
   fi
+  echo $prefix
+}
+
+nave_usemain () {
+  if [ ${NAVELVL-0} -gt 0 ]; then
+    fail "Can't usemain inside a nave subshell. Exit to main shell."
+  fi
+  local version=$(ver "$1")
+  local prefix="$(main_prefix)"
+  local current=$(node -v || true)
   current="${current/v/}"
   if [ "$current" == "$version" ]; then
     echo "$version already installed" >&2
@@ -496,6 +548,38 @@ nave_usemain () {
   fi
 
   build "$version" "$prefix"
+  nave_write_env "global" "$version" "$prefix"
+}
+
+nave_uninstall_main () {
+  local prefix="$(main_prefix)"
+  local current=$(node -v || true)
+  current="${current/v/}"
+  if [ "$current" == "" ]; then
+    echo "No node installed"
+    return 0
+  fi
+  if [ "$os" == "cygwin" ]; then
+    # XXX todo
+    return 0
+  fi
+  local t="$current-$os-$arch"
+  local tgz="$NAVE_SRC/${t}.tar.gz"
+  get_node "$version" "$tgz" "-v${t}.tar.gz"
+  local files=$(tar tf "$tgz" | sed -e "s|^[^/]*|$prefix|g" | sort -r)
+  for file in $files; do
+    if [ -f $file ]; then
+      rm -f -- $file || fail "Could not remove $file"
+    elif [ -d $file ]; then
+      # delete directories only if empty
+      local contents="$(ls -A $file)"
+      if [ "$contents" == "" ]; then
+        remove_dir $file
+      fi
+    fi
+  done
+  # remove env file
+  rm -f "${prefix}/.nave_env"
 }
 
 nave_modules () {
@@ -503,20 +587,16 @@ nave_modules () {
   shift
   local modules="$1"
   shift
+  local group="$1"
+  shift
   local update_npm="$1"
   shift
   if [ -z "$modules" ]; then
     return 0
   fi
-  local SCRIPT="$NAVE_BIN_DIR/node_modules.js"
-  while [ -h "$SCRIPT" ]; do
-    DIR=$(dirname -- "$SCRIPT")
-    SYM=$(readlink -- "$SCRIPT")
-    SCRIPT=$( cd -- "$DIR" \
-         && cd -- $(dirname -- "$SYM") \
-         && pwd )/$(basename -- "$SYM")
-  done
 
+  local SCRIPT="$NAVE_BIN_DIR/node_modules.js"
+  SCRIPT="$(resolve "$SCRIPT")"
   [ "$os" == "cygwin" ] && SCRIPT=$(cygpath -m $SCRIPT)
 
   # Update npm to latest version
@@ -529,25 +609,31 @@ nave_modules () {
       nave_npm "$version" "-g" "install" "npm"
     fi
   fi
+
+  # do nothing on missing modules
+  if ! [ -f "$modules" ]; then
+    return 0
+  fi
+
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf semver")
   # XXX: remove
   if [ "$os" != "cygwin" ]; then BOOTSTRAP+=" sleep"; fi
-  for module in $BOOTSTRAP; do
+  for module in ${BOOTSTRAP[@]}; do
     nave_npm "$version" "-g" "ls" "--depth" "0" "$module"
     local ret=$?
     if [ $ret -ne 0 ]; then
       nave_npm "$version" "-g" "install" "$module"
       ret=$?
-      if [ $ret -ne 0 ]; then
-        return $ret
-      fi
+    fi
+    if [ $ret -ne 0 ]; then
+      echo "Cannot install $module from bootstrap"
+      return $ret
     fi
   done
 
-  args=$(join '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
-      "-t" "$mods_type" "-d" '$NODE_MODULES')
-  nave_exec_env "0" "$version" "$version" "-c" "$args"
+  nave_run "$version" '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
+      "-t" "$group" "-d" '$NODE_MODULES'
   return $?
 }
 
@@ -693,7 +779,7 @@ nave_has () {
 nave_installed () {
   local version=$(ver "$1")
   local node="$NAVE_ROOT/$version/bin/node"
-  if [ "$os" == "cygwin" ]; then node="$node.exe"; fi
+  if [ "$os" == "cygwin" ]; then node="${node}.exe"; fi
   [ -x "$node" ] || return 1
 }
 
@@ -724,31 +810,27 @@ nave_use () {
 
   nave_install "$version" || fail "failed to install $version"
   echo "using $version" >&2
-  nave_run "login" "$version" "$version"
+  nave_login "$version"
+  return $?
+}
+
+nave_login () {
+  local name="$1"
+  local args=()
+  if [ "$shell" != "zsh" ]; then
+    # bash, use --rcfile argument
+    args=("--rcfile" "$NAVE_DIR/.zshenv")
+  fi
+  nave_exec_env "1" "$name" "${args[@]}"
   return $?
 }
 
 nave_run () {
-  local exec="$1"
+  local name="$1"
   shift
-
-  local isLogin
-
-  if [ "$exec" == "exec" ]; then
-    isLogin=""
-    # source the nave env file, then run the command.
-    args=("-c" ". $(enquote_all $NAVE_DIR/.zshenv); $(enquote_all "$@")")
-  elif [ "$shell" == "zsh" ]; then
-    isLogin="1"
-    # no need to set rcfile, since ZDOTDIR is set.
-    args=()
-  else
-    isLogin="1"
-    # bash, use --rcfile argument
-    args=("--rcfile" "$NAVE_DIR/.zshenv")
-  fi
-
-  nave_exec_env "$isLogin" "$@" "${args[@]}"
+  # source the nave env file, then run the command.
+  local args=$(join ". $NAVE_DIR/.zshenv;" "$@")
+  nave_exec_env "" "$name" "-c" "${args[@]}"
   return $?
 }
 
@@ -758,54 +840,12 @@ nave_exec_env () {
   shift
   local name="$1"
   shift
-  local version="$1"
-  shift
-
-  local prefix="$NAVE_ROOT/$name"
-  local bin="$prefix/bin"
-  local lib="$prefix/lib/node"
-  local modules="$prefix/lib/node_modules"
-  local man="$prefix/share/man"
-  local path="$bin"
-  ensure_dir "$bin"
-  ensure_dir "$lib"
-  ensure_dir "$man"
-
-  if [ "$os" == "cygwin" ]; then
-    # XXX: cygwin stores npm binaries in $prefix/lib instead
-    # of bindir, need to force $bin for npm binaries
-    path="$path:$prefix/lib"
-    prefix="$(cygpath -w $prefix)\\lib"
-    bin=$(cygpath -w $bin)
-    lib=$(cygpath -w $lib)
-    modules=$(cygpath -w $modules)
-    man=$(cygpath -w $modules)
-  fi
-
   # now $@ is the command to run, or empty if it's not an exec.
+
+  local env_file="$NAVE_ROOT/$name/.nave_env"
   local exit_code
-  local nave="$version"
-  if [ "$version" != "$name" ]; then
-    nave="$name"-"$version"
-  fi
-
-  local sep=":"
-  [ "$os" == "cygwin" ] && sep=";"
-
   NAVELVL=$lvl \
-  NAVEPATH="$path" \
-  NAVEBIN="$bin" \
-  NAVEVERSION="$version" \
-  NAVENAME="$name" \
-  NAVE="$nave" \
-  npm_config_binroot="$bin"\
-  npm_config_root="$lib" \
-  npm_config_manroot="$man" \
-  npm_config_prefix="$prefix" \
-  NODE_MODULES="$modules" \
-  NODE_PATH="$lib${sep}$modules" \
-  NAVE_LOGIN="$isLogin" \
-  NAVE_DIR="$NAVE_DIR" \
+  NAVE_ENV=$env_file \
   ZDOTDIR="$NAVE_DIR" \
     "$SHELL" "$@"
 
@@ -839,10 +879,10 @@ nave_named () {
 
   # get the version
   if [ $# -gt 0 ]; then
-    nave_run "exec" "$name" "$version" "$@"
+    nave_run "$name" "$@"
     return $?
   else
-    nave_run "login" "$name" "$version"
+    nave_login "$name"
     return $?
   fi
 }
@@ -872,14 +912,12 @@ add_named_env () {
   echo "Creating new env named '$name' using node $version" >&2
 
   nave_install "$version" || fail "failed to install $version"
-  ensure_dir "$NAVE_ROOT/$name/bin"
-  ensure_dir "$NAVE_ROOT/$name/lib/node"
-  ensure_dir "$NAVE_ROOT/$name/lib/node_modules"
-  ensure_dir "$NAVE_ROOT/$name/share/man"
+  nave_write_env "$name" "$version"
 
-  ln -sf -- "$NAVE_ROOT/$version/bin/node" "$NAVE_ROOT/$name/bin/node"
-  ln -sf -- "$NAVE_ROOT/$version/bin/npm"  "$NAVE_ROOT/$name/bin/npm"
-  ln -sf -- "$NAVE_ROOT/$version/bin/node-waf" "$NAVE_ROOT/$name/bin/node-waf"
+  local binaries=("node npm node-waf")
+  for bin in "${binaries[@]}"; do
+    ln -sf -- "$NAVE_ROOT/$version/bin/$bin" "$NAVE_ROOT/$name/bin/$bin"
+  done
 }
 
 nave_clean () {
@@ -888,14 +926,17 @@ nave_clean () {
 }
 
 nave_uninstall () {
+  if [ "$1" == "global" ]; then
+      nave_uninstall_main
+      return $?
+  fi
   remove_dir "$NAVE_ROOT/$(ver "$1")"
 }
 
 nave_npm () {
-  local version="$1"
+  local version=$(ver "$1")
   shift
-  local args=$(join '$NAVEBIN/npm' "$@")
-  nave_exec_env "0" "$version" "$version" "-c" "$args"
+  nave_run "$version" '$NAVEBIN/npm' "$@"
 }
 
 nave_help () {
