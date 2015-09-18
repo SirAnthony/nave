@@ -93,8 +93,10 @@ main () {
   export NAVE_DIR
   export NAVE_SRC="$NAVE_DIR/src"
   export NAVE_ROOT="$NAVE_DIR/installed"
+  export NAVE_GLOBAL_MODULES="$NAVE_DIR/modules"
   ensure_dir "$NAVE_SRC"
   ensure_dir "$NAVE_ROOT"
+  ensure_dir "$NAVE_GLOBAL_MODULES"
 
   local cmd="$1"
   shift
@@ -455,7 +457,8 @@ build_unix () {
       get_node "$version" "$tgz" "-v${t}.tar.gz"
       if [ -f "$tgz" ] && sha_check "$tgz"; then
         # unpack straight into the build target.
-        $tar xzf "$tgz" -C "$target" --strip-components 1
+        $tar xzf "$tgz" -C "$target" --keep-directory-symlink \
+          --strip-components 1
         if [ $? -eq 0 ]; then
           # it worked!
           echo "installed from binary" >&2
@@ -547,6 +550,19 @@ nave_usemain () {
     return 0
   fi
 
+  local modules_dir="$NAVE_GLOBAL_MODULES/$version"
+  local current_modules="$prefix/lib/node_modules"
+  if [ -e "$current_modules" ]; then
+    if ! [ -h "$current_modules" ]; then
+      echo "Refuse to delete $current_modules since it is not symlink"
+      return 1
+    fi
+    rm "$current_modules"
+  fi
+  # create link modules link to keep different versions separated
+  ensure_dir "$modules_dir"
+  ln -s -- "$modules_dir" "$current_modules"
+
   build "$version" "$prefix"
   nave_write_env "global" "$version" "$prefix"
 }
@@ -632,6 +648,13 @@ nave_modules () {
     fi
   done
 
+  if [ -z "$group" ]; then
+    if [ "$version" == "global" ]; then
+      group="global"
+    else
+      group="local"
+    fi
+  fi
   nave_run "$version" '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
       "-t" "$group" "-d" '$NODE_MODULES'
   return $?
@@ -842,7 +865,9 @@ nave_exec_env () {
   shift
   # now $@ is the command to run, or empty if it's not an exec.
 
-  local env_file="$NAVE_ROOT/$name/.nave_env"
+  local prefix="$NAVE_ROOT/$name"
+  [ "$name" == "global" ] && prefix="$(main_prefix)"
+  local env_file="$prefix/.nave_env"
   local exit_code
   NAVELVL=$lvl \
   NAVE_ENV=$env_file \
