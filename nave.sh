@@ -91,12 +91,14 @@ main () {
   nave_rc "$NAVE_DIR"
 
   export NAVE_DIR
+  export NAVE_ENV_FILE="nave_env"
   export NAVE_SRC="$NAVE_DIR/src"
   export NAVE_ROOT="$NAVE_DIR/installed"
-  export NAVE_GLOBAL_MODULES="$NAVE_DIR/modules"
+  export NAVE_GLOBAL_ROOT="$NAVE_DIR/global"
+  export NAVE_GLOBAL_VERSION="$NAVE_GLOBAL_ROOT/version"
   ensure_dir "$NAVE_SRC"
   ensure_dir "$NAVE_ROOT"
-  ensure_dir "$NAVE_GLOBAL_MODULES"
+  ensure_dir "$NAVE_GLOBAL_ROOT"
 
   local cmd="$1"
   shift
@@ -218,7 +220,7 @@ nave_write_env () {
 
   local prefix="$NAVE_ROOT/$name"
   [ "$target" != "" ] && prefix="$target"
-  local env_file="$prefix/.nave_env"
+  local env_file="$prefix/$NAVE_ENV_FILE"
   local bin="$prefix/bin"
   local lib="$prefix/lib/node"
   local modules="$prefix/lib/node_modules"
@@ -520,7 +522,7 @@ build () {
   $cmd "$version" "$target"
   local ret=$?
   if [ $ret -eq 0 ]; then
-    nave_write_env "$version" "$version"
+    nave_write_env "$version" "$version" "$target"
   fi
   return $ret
 }
@@ -537,77 +539,92 @@ function main_prefix () {
   echo $prefix
 }
 
-nave_usemain () {
-  if [ ${NAVELVL-0} -gt 0 ]; then
-    fail "Can't usemain inside a nave subshell. Exit to main shell."
-  fi
+# non-bin files
+NODE_FILES=("include/node lib/node lib/node_modules share/doc/node
+  share/man/man1/node.1 share/man/man1/iojs.1
+  share/systemtap/tapset/node.stp")
+nave_global_install () {
   local version=$(ver "$1")
-  local prefix="$(main_prefix)"
-  local current=$(node -v || true)
-  current="${current/v/}"
-  if [ "$current" == "$version" ]; then
-    echo "$version already installed" >&2
-    return 0
-  fi
+  local install="$NAVE_GLOBAL_ROOT/$version"
+  local prefix=$(main_prefix)
+  local files="$NODE_FILES"
+  for file in $(ls $install/bin); do
+    files="$files bin/$file"
+  done
 
-  local modules_dir="$NAVE_GLOBAL_MODULES/$version"
-  local current_modules="$prefix/lib/node_modules"
-  if [ -e "$current_modules" ]; then
-    if ! [ -h "$current_modules" ]; then
-      echo "Refuse to delete $current_modules since it is not symlink"
-      return 1
+  for file in $files; do
+    local dst="$prefix/$file"
+    local src="$install/$file"
+    if ! [ -e "$src" ]; then
+      continue
     fi
-    rm "$current_modules"
-  fi
-  # create link modules link to keep different versions separated
-  ensure_dir "$modules_dir"
-  ln -s -- "$modules_dir" "$current_modules"
+    if [ -e "$dst" ]; then
+      if ! [ -h "$dst" ]; then
+        echo "Refuse to delete $dst since it is not symlink"
+        return 1
+      fi
+    fi
+    ensure_dir $(dirname "$dst")
+    ln -snf -- "$src" "$dst"
+  done
 
-  build "$version" "$prefix"
+  # Create env & version files, global
   nave_write_env "global" "$version" "$prefix"
+  echo -n "$version" > "$NAVE_GLOBAL_ROOT/version"
 }
 
-nave_uninstall_main () {
+nave_global_uninstall () {
   local prefix="$(main_prefix)"
-  local current=$(node -v || true)
+  local current=$(node -v 2>/dev/null || true)
   current="${current/v/}"
   if [ "$current" == "" ]; then
     echo "No node installed"
     return 0
   fi
-  if [ "$os" == "cygwin" ]; then
-    # XXX todo
-    return 0
-  fi
-  local t="$current-$os-$arch"
-  local tgz="$NAVE_SRC/${t}.tar.gz"
-  get_node "$version" "$tgz" "-v${t}.tar.gz"
-  local files=$(tar tf "$tgz" | sed -e "s|^[^/]*|$prefix|g" | sort -r)
-  for file in $files; do
-    if [ -f $file ]; then
-      rm -f -- $file || fail "Could not remove $file"
-    elif [ -d $file ]; then
-      # delete directories only if empty
-      local contents="$(ls -A $file)"
-      if [ "$contents" == "" ]; then
-        remove_dir $file
-      fi
+  # Remove modules trash
+  local bindir="$prefix/bin/node"
+  bindir=`dirname $(resolve "$bindir")`
+  for file in $(ls $bindir); do
+    src="$bindir/$file"
+    target="$prefix/bin/$file"
+    if [ -h $target ] && [ "$target" -ef "$src" ]; then
+      rm -f -- $target
+    fi
+  done
+  # Remove node files
+  for file in $NODE_FILES; do
+    target="${prefix}/$file"
+    if [ -h $target ]; then
+      rm -f -- $target || fail "Could not remove $file"
+      local dir=$(dirname "$file")
+      while [ "$dir" != "." ] && [ "$(ls -A $prefix/$dir)" == "" ]; do
+        remove_dir "$prefix/$dir"
+        dir=$(dirname "$dir")
+      done
+    elif [ -e $target ]; then
+      fail "$target is not a symlink"
     fi
   done
   # remove env file
-  rm -f "${prefix}/.nave_env"
+  rm -f "$prefix/$NAVE_ENV_FILE"
+  rm -f "$NAVE_GLOBAL_VERSION"
+}
+
+nave_usemain () {
+  if [ ${NAVELVL-0} -gt 0 ]; then
+    fail "Can't usemain inside a nave subshell. Exit to main shell."
+  fi
+  local version=$(ver "$1")
+  nave_install "$version" "global"
+  nave_global_install "$version"
 }
 
 nave_modules () {
   local version=$(ver "$1")
-  shift
-  local modules="$1"
-  shift
-  local group="$1"
-  shift
-  local update_npm="$1"
-  shift
-  if [ -z "$modules" ]; then
+  local modules="$2"
+  local group="$3"
+  # do nothing on missing modules
+  if [ -z "$modules" ] || ! [ -f "$modules" ]; then
     return 0
   fi
 
@@ -615,28 +632,12 @@ nave_modules () {
   SCRIPT="$(resolve "$SCRIPT")"
   [ "$os" == "cygwin" ] && SCRIPT=$(cygpath -m $SCRIPT)
 
-  # Update npm to latest version
-  if ! [ -z "$update_npm" ]; then
-    # XXX: check if supported on old versions of node
-    local remote_npm_ver=$(nave_npm "$version" "info" "npm" "version")
-    local npm_ver=$(nave_npm "$version" "ls" "--depth" "0" "-g" "npm" \
-      "|" "grep" "npm@" "|" "sed" "-e" "s/.*npm@//g" "-e" "s/[[:space:]]//g")
-    if [ "x${npm_ver}x" != "x${remote_npm_ver}x" ]; then
-      nave_npm "$version" "-g" "install" "npm"
-    fi
-  fi
-
-  # do nothing on missing modules
-  if ! [ -f "$modules" ]; then
-    return 0
-  fi
-
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf semver")
   # XXX: remove
   if [ "$os" != "cygwin" ]; then BOOTSTRAP+=" sleep"; fi
   for module in ${BOOTSTRAP[@]}; do
-    nave_npm "$version" "-g" "ls" "--depth" "0" "$module"
+    nave_npm "$version" "-g" "ls" "--depth" "0" "$module" "2>&1 1>/dev/null"
     local ret=$?
     if [ $ret -ne 0 ]; then
       nave_npm "$version" "-g" "install" "$module"
@@ -662,14 +663,17 @@ nave_modules () {
 
 nave_install () {
   local version=$(ver "$1")
+  local global="$2"
   if [ -z "$version" ]; then
     fail "Must supply a version ('stable', 'latest' or numeric)"
   fi
-  if nave_installed "$version"; then
+  if nave_installed "$version" "$global"; then
     echo "Already installed: $version" >&2
     return 0;
   fi
-  local install="$NAVE_ROOT/$version"
+  local root="$NAVE_ROOT"
+  [ "$global" == "global" ] && root="$NAVE_GLOBAL_ROOT"
+  local install="$root/$version"
   ensure_dir "$install"
 
   build "$version" "$install"
@@ -801,7 +805,10 @@ nave_has () {
 
 nave_installed () {
   local version=$(ver "$1")
-  local node="$NAVE_ROOT/$version/bin/node"
+  local global="$2"
+  local root="$NAVE_ROOT"
+  [ "$global" == "global" ] && root="$NAVE_GLOBAL_ROOT"
+  local node="$root/$version/bin/node"
   if [ "$os" == "cygwin" ]; then node="${node}.exe"; fi
   [ -x "$node" ] || return 1
 }
@@ -866,8 +873,12 @@ nave_exec_env () {
   # now $@ is the command to run, or empty if it's not an exec.
 
   local prefix="$NAVE_ROOT/$name"
-  [ "$name" == "global" ] && prefix="$(main_prefix)"
-  local env_file="$prefix/.nave_env"
+  if [ "$name" == "global" ]; then
+      [ -f "$NAVE_GLOBAL_VERSION" ] || fail "No global version installed"
+      local version=$(cat "$NAVE_GLOBAL_VERSION")
+      prefix="$NAVE_GLOBAL_ROOT/$version"
+  fi
+  local env_file="$prefix/$NAVE_ENV_FILE"
   local exit_code
   NAVELVL=$lvl \
   NAVE_ENV=$env_file \
@@ -951,11 +962,15 @@ nave_clean () {
 }
 
 nave_uninstall () {
-  if [ "$1" == "global" ]; then
-      nave_uninstall_main
+  local version=$(ver "$1")
+  local global=$2
+  if [ "$version" == "global" ]; then
+      nave_global_uninstall
       return $?
   fi
-  remove_dir "$NAVE_ROOT/$(ver "$1")"
+  local root="$NAVE_ROOT"
+  [ "$global" == "global" ] && root=$NAVE_GLOBAL_ROOT
+  remove_dir "$root/$version"
 }
 
 nave_npm () {
@@ -981,6 +996,8 @@ use <name> <ver>          Create a named env, using the specified version.
 usemain <version>         Install in /usr/local/bin (ie, use as your main nodejs)
 clean <version>           Delete the source code for <version>
 uninstall <version>       Delete the install for <version>
+                          "global" as version will uninstall symlinks from prefix
+                          "global" as second argument will uninstall from directory
 npm <version> [args..]    Run npm in <version> env
 ls                        List versions currently installed
 ls-remote                 List remote node versions
