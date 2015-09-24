@@ -539,6 +539,11 @@ function main_prefix () {
   echo $prefix
 }
 
+function global_version () {
+  [ -f "$NAVE_GLOBAL_VERSION" ] || fail "No global version installed"
+  echo $(cat "$NAVE_GLOBAL_VERSION")
+}
+
 # non-bin files
 NODE_FILES=("include/node lib/node lib/node_modules share/doc/node
   share/man/man1/node.1 share/man/man1/iojs.1
@@ -635,17 +640,18 @@ nave_modules () {
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf semver")
   # XXX: remove
-  if [ "$os" != "cygwin" ]; then BOOTSTRAP+=" sleep"; fi
+  [ "$os" != "cygwin" ] && BOOTSTRAP+=" sleep"
   for module in ${BOOTSTRAP[@]}; do
-    nave_npm "$version" "-g" "ls" "--depth" "0" "$module" "2>&1 1>/dev/null"
-    local ret=$?
-    if [ $ret -ne 0 ]; then
+    # nave_npm is noticeable slow
+    local prefix="$NAVE_ROOT/$version"
+    [ "$version" == "global" ] && prefix="$NAVE_GLOBAL_ROOT/$(global_version)"
+    if ! [ -f "$prefix/lib/node_modules/$module/package.json" ]; then
       nave_npm "$version" "-g" "install" "$module"
-      ret=$?
-    fi
-    if [ $ret -ne 0 ]; then
-      echo "Cannot install $module from bootstrap"
-      return $ret
+      local ret=$?
+      if [ $ret -ne 0 ]; then
+        echo "Cannot install $module from bootstrap"
+        return $ret
+      fi
     fi
   done
 
@@ -656,7 +662,7 @@ nave_modules () {
       group="local"
     fi
   fi
-  nave_run "$version" '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-s" \
+  nave_run "$version" '$NAVEBIN/node' "$SCRIPT" "build" "$modules" "-v" "-s" \
       "-t" "$group" "-d" '$NODE_MODULES'
   return $?
 }
@@ -874,9 +880,7 @@ nave_exec_env () {
 
   local prefix="$NAVE_ROOT/$name"
   if [ "$name" == "global" ]; then
-      [ -f "$NAVE_GLOBAL_VERSION" ] || fail "No global version installed"
-      local version=$(cat "$NAVE_GLOBAL_VERSION")
-      prefix="$NAVE_GLOBAL_ROOT/$version"
+      prefix="$NAVE_GLOBAL_ROOT/$(global_version)"
   fi
   local env_file="$prefix/$NAVE_ENV_FILE"
   local exit_code
