@@ -74,7 +74,7 @@ main () {
             ) && SELF_PATH=$SELF_PATH/$(basename -- "$0")
 
   # resolve symlinks
-  SELF_PATH="$(resolve "$SELF_PATH")"
+  SELF_PATH="$(realpath "$SELF_PATH")"
   NAVE_BIN_DIR="$(dirname -- "$SELF_PATH")"
 
   if [ -z "$NAVE_DIR" ]; then
@@ -106,9 +106,6 @@ main () {
     ls-remote | ls-all)
       cmd="nave_${cmd/-/_}"
       ;;
-#    use)
-#      cmd="nave_named"
-#      ;;
     install | modules | fetch | use | clean | test | named | npm | \
     ls | uninstall | usemain | latest | stable | has | installed )
       cmd="nave_$cmd"
@@ -129,19 +126,6 @@ main () {
 
 function join () {
   local IFS=" "; echo "$*";
-}
-
-function resolve () {
-  local FILE="$1"
-  local DIR SYM
-  while [ -h "$FILE" ]; do
-    DIR=$(dirname -- "$FILE")
-    SYM=$(readlink -- "$FILE")
-    FILE=$( cd -- "$DIR" \
-         && cd -- $(dirname -- "$SYM") \
-         && pwd )/$(basename -- "$SYM")
-  done
-  echo $FILE
 }
 
 ensure_dir () {
@@ -459,8 +443,7 @@ build_unix () {
       get_node "$version" "$tgz" "-v${t}.tar.gz"
       if [ -f "$tgz" ] && sha_check "$tgz"; then
         # unpack straight into the build target.
-        $tar xzf "$tgz" -C "$target" --keep-directory-symlink \
-          --strip-components 1
+        $tar xzf "$tgz" -C "$target" --strip-components 1
         if [ $? -eq 0 ]; then
           # it worked!
           echo "installed from binary" >&2
@@ -554,7 +537,9 @@ nave_global_install () {
   local prefix=$(main_prefix)
   local files="$NODE_FILES"
   for file in $(ls $install/bin); do
-    files="$files bin/$file"
+    if [ "$file" != "node" ] && [ "$file" != "npm" ]; then
+      files="$files bin/$file"
+    fi
   done
 
   for file in $files; do
@@ -573,6 +558,22 @@ nave_global_install () {
     ln -snf -- "$src" "$dst"
   done
 
+  # add wrappers for binaries
+  local binaries=("node npm")
+  local env_file="$NAVE_GLOBAL_ROOT/$version/$NAVE_ENV_FILE"
+  ensure_dir "$prefix/bin"
+  for file in $binaries; do
+    local src="$install/bin/$file"
+    local dst="$prefix/bin/$file"
+    cat > "$dst" <<BIN
+#!$SHELL
+source $env_file
+$src "\$@"
+BIN
+  chmod 0755 "$dst"
+  [ -f "$dst" ] || fail "Cannot create $dst is not writable.";
+  done
+
   # Create env & version files, global
   nave_write_env "global" "$version" "$prefix"
   echo -n "$version" > "$NAVE_GLOBAL_ROOT/version"
@@ -587,18 +588,23 @@ nave_global_uninstall () {
     return 0
   fi
   # Remove modules trash
-  local bindir="$prefix/bin/node"
-  bindir=`dirname $(resolve "$bindir")`
+  local bindir="$prefix/lib/node_modules"
+  bindir=$(realpath "$bindir/../../bin")
   for file in $(ls $bindir); do
-    src="$bindir/$file"
-    target="$prefix/bin/$file"
+    local src="$bindir/$file"
+    local target="$prefix/bin/$file"
     if [ -h $target ] && [ "$target" -ef "$src" ]; then
       rm -f -- $target
+    elif [ "$file" == "node" ] || [ "$file" == "npm" ]; then
+      local cont=$(awk 'FNR==3 {print $1}' "$target")
+      if [ "$cont"  == "$src" ]; then
+        rm -f -- $target
+      fi
     fi
   done
   # Remove node files
   for file in $NODE_FILES; do
-    target="${prefix}/$file"
+    local target="${prefix}/$file"
     if [ -h $target ]; then
       rm -f -- $target || fail "Could not remove $file"
       local dir=$(dirname "$file")
@@ -634,17 +640,18 @@ nave_modules () {
   fi
 
   local SCRIPT="$NAVE_BIN_DIR/node_modules.js"
-  SCRIPT="$(resolve "$SCRIPT")"
+  SCRIPT="$(realpath "$SCRIPT")"
   [ "$os" == "cygwin" ] && SCRIPT=$(cygpath -m $SCRIPT)
 
   # install bootstrap modules
   local BOOTSTRAP=("node-getopt rimraf semver")
   # XXX: remove
   [ "$os" != "cygwin" ] && BOOTSTRAP+=" sleep"
+  local global_ver=$(global_version)
   for module in ${BOOTSTRAP[@]}; do
     # nave_npm is noticeable slow
     local prefix="$NAVE_ROOT/$version"
-    [ "$version" == "global" ] && prefix="$NAVE_GLOBAL_ROOT/$(global_version)"
+    [ "$version" == "global" ] && prefix="$NAVE_GLOBAL_ROOT/$global_ver"
     if ! [ -f "$prefix/lib/node_modules/$module/package.json" ]; then
       nave_npm "$version" "-g" "install" "$module"
       local ret=$?
@@ -821,13 +828,22 @@ nave_installed () {
 
 nave_use () {
   local version=$(ver "$1")
+  shift
 
   # if it's not a version number, then treat as a name.
   case "$version" in
-    +([0-9])\.+([0-9])\.+([0-9])) ;;
+    global)
+      [ $(global_version) ] || fail "No global version installed"
+      ;;
+    +([0-9])\.+([0-9])\.+([0-9]))
+      nave_install "$version" || fail "failed to install $version"
+      ;;
     *)
-      nave_named "$@"
-      return $?
+      local name_ver=$(ver "$1" NONAMES)
+      if [ "$name_ver" != "" ]; then
+          shift
+      fi
+      add_named_env "$version" "$name_ver" || fail "fail to create $name env"
       ;;
   esac
 
@@ -844,9 +860,14 @@ nave_use () {
     return $?
   fi
 
-  nave_install "$version" || fail "failed to install $version"
   echo "using $version" >&2
-  nave_login "$version"
+  if [ $# -gt 0 ]; then
+    nave_run "$version" "$@"
+    return $?
+  else
+    nave_login "$version"
+    return $?
+  fi
   return $?
 }
 
@@ -892,39 +913,6 @@ nave_exec_env () {
   exit_code=$?
   hash -r
   return $exit_code
-}
-
-nave_named () {
-  local name="$1"
-  shift
-
-  local version=$(ver "$1" NONAMES)
-  if [ "$version" != "" ]; then
-    shift
-  fi
-
-  add_named_env "$name" "$version" || fail "failed to create $name env"
-
-  if [ "$name" == "$NAVENAME" ] && [ "$version" == "$NAVEVERSION" ]; then
-    echo "already using $name" >&2
-    if [ $# -gt 0 ]; then
-      "$@"
-    fi
-    return $?
-  fi
-
-  if [ "$version" = "" ]; then
-    version="$(ver "$("$NAVE_ROOT/$name/bin/node" -v 2>/dev/null)")"
-  fi
-
-  # get the version
-  if [ $# -gt 0 ]; then
-    nave_run "$name" "$@"
-    return $?
-  else
-    nave_login "$name"
-    return $?
-  fi
 }
 
 add_named_env () {
@@ -990,24 +978,24 @@ Usage: nave <cmd>
 
 Commands:
 
-install <version>         Install the version passed (ex: 0.1.103).
-modules <version> <list>  Install modules from specified list
-use <version>             Enter a subshell where <version> is being used
-use <ver> <program>       Enter a subshell, and run "<program>", then exit
-use <name> <ver>          Create a named env, using the specified version.
-                          If the name already exists, but the version differs,
-                          then it will update the link.
-usemain <version>         Install in /usr/local/bin (ie, use as your main nodejs)
-clean <version>           Delete the source code for <version>
-uninstall <version>       Delete the install for <version>
-                          "global" as version will uninstall symlinks from prefix
-                          "global" as second argument will uninstall from directory
-npm <version> [args..]    Run npm in <version> env
-ls                        List versions currently installed
-ls-remote                 List remote node versions
-ls-all                    List remote and local node versions
-latest                    Show the most recent dist version
-help                      Output help information
+install <version>     Install the version passed (ex: 0.1.103).
+modules <ver> <list>  Install modules from specified list
+use <version>         Enter a subshell where <version> is being used
+use <ver> <program>   Enter a subshell, and run "<program>", then exit
+use <name> <ver>      Create a named env, using the specified version.
+                      If the name already exists, but the version differs,
+                      then it will update the link.
+usemain <version>     Install in /usr/local/bin (ie, use as your main nodejs)
+clean <version>       Delete the source code for <version>
+uninstall <version>   Delete the install for <version>
+                      "global" as version will uninstall symlinks from prefix
+                      "global" as second argument will uninstall from directory
+npm <ver> [args..]    Run npm in <version> env
+ls                    List versions currently installed
+ls-remote             List remote node versions
+ls-all                List remote and local node versions
+latest                Show the most recent dist version
+help                  Output help information
 
 <version> can be the string "latest" to get the latest distribution.
 <version> can be the string "stable" to get the latest stable version.
