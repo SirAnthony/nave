@@ -515,7 +515,8 @@ function main_prefix () {
   local prefix="/usr/local"
   if [ "x$wn" != "x" ]; then
     prefix="${wn/\/bin\/node/}"
-    if [ "x$prefix" == "x" ]; then
+    # env file should be in prefix, or it is not nave installation
+    if [ "x$prefix" == "x" ] || ! [ -f "$prefix/$NAVE_ENV_FILE" ]; then
       prefix="/usr/local"
     fi
   fi
